@@ -1,0 +1,116 @@
+pipeline {
+    
+    agent {
+        label "linuxbuildnode"  // # Agent (build node) label where the pipeline should run
+    }
+    
+    stages {
+
+        stage('SCM') {
+            steps {
+                // # Checkout code from GitHub repository
+                git 'https://github.com/your-org/your-repo.git'  // Replace with your repo
+            }
+        }
+
+        stage('Build by Maven Package') {
+            steps {
+                // # Clean and package the Maven project
+                sh 'mvn clean package'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                // # Build a Docker image with a unique tag using BUILD_TAG
+                sh "docker build -t yourdockerhubuser/javaweb:${BUILD_TAG} ."
+            }
+        }
+
+        stage('Push Image to Docker Hub') {
+            steps {
+                withCredentials([string(credentialsId: 'DOCKER_HUB_PWD', variable: 'DOCKER_HUB_PASS_CODE')]) {
+                    // # Log in to Docker Hub using stored credentials
+                    sh "docker login -u yourdockerhubuser -p $DOCKER_HUB_PASS_CODE"
+                }
+                // # Push the Docker image to Docker Hub
+                sh "docker push yourdockerhubuser/javaweb:${BUILD_TAG}"
+            }
+        }
+
+        stage('Deploy to Dev Environment') {
+            steps {
+                // # Remove old container if it exists and run a new one in DEV
+                sh 'docker rm -f myjavaapp || true'
+                sh "docker run -d -p 8080:8080 --name myjavaapp yourdockerhubuser/javaweb:${BUILD_TAG}"
+            }
+        }
+
+        stage('Deploy to QA/Test Environment') {
+            steps {
+                sshagent(['QA_ENV_SSH_CRED']) {
+                    // # SSH to QA server and redeploy the app
+                    sh "ssh -o StrictHostKeyChecking=no user@QA_SERVER_IP docker rm -f myjavaapp || true"
+                    sh "ssh user@QA_SERVER_IP docker run -d -p 8080:8080 --name myjavaapp yourdockerhubuser/javaweb:${BUILD_TAG}"
+                }
+            }
+        }
+
+        stage('QA Smoke Test') {
+            steps {
+                // # Retry testing the app up to 10 times to ensure it's up
+                retry(10) {
+                    sh 'curl --silent http://QA_SERVER_IP:8080/java-web-app/ | grep India'
+                }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                script {
+                    // # Prompt user for manual approval before promoting to prod
+                    Boolean userInput = input(id: 'Proceed1', message: 'Promote build?', 
+                        parameters: [[$class: 'BooleanParameterDefinition', defaultValue: true, name: 'Please confirm you agree with this']])
+                    
+                    if (userInput) {
+                        echo "Approved for production deployment"
+                    } else {
+                        echo "Action was aborted by user"
+                        error("Pipeline stopped by user")
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Prod Environment') {
+            steps {
+                sshagent(['QA_ENV_SSH_CRED']) {
+                    // # SSH to Prod server and deploy to Kubernetes
+                    sh "ssh -o StrictHostKeyChecking=no user@PROD_SERVER_IP kubectl delete deployment myjavawebapp || true"
+                    sh "ssh user@PROD_SERVER_IP kubectl create deployment myjavawebapp --image=yourdockerhubuser/javaweb:${BUILD_TAG}"
+                    sh "ssh user@PROD_SERVER_IP wget https://your-git-repo-url/webappsvc.yml"
+                    sh "ssh user@PROD_SERVER_IP kubectl apply -f webappsvc.yml"
+                    sh "ssh user@PROD_SERVER_IP kubectl scale deployment myjavawebapp --replicas=5"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline finished (success or fail)"
+        }
+        success {
+            echo "Pipeline ran successfully"
+        }
+        unstable {
+            echo "Build is unstable. Please check logs."
+        }
+        failure {
+            echo "Pipeline failed"
+            // # Send failure notification (customize recipients)
+            mail bcc: '', body: 'Build failed. Please check Jenkins logs.', cc: '', from: '', 
+                 replyTo: '', subject: 'Jenkins Job Failed', to: 'your-team@example.com'
+        }
+    }
+}
